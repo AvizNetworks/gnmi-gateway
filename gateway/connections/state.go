@@ -32,6 +32,9 @@ package connections
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
+	"io/ioutil"
+  "os"
 	"fmt"
 	"github.com/go-zookeeper/zk"
 	"github.com/openconfig/gnmi/errlist"
@@ -164,23 +167,49 @@ func (t *ConnectionState) doConnect() {
 		}
 	}
 
-	// TODO (cmcintosh): make PR for targetpb to include TLS config and remove this
-	_, NoTLS := t.target.Meta["NoTLS"]
-	if NoTLS && !t.noTLSWarning {
-		t.noTLSWarning = true
-		t.config.Log.Warn().Msg("DEPRECATED: The 'NoTLS' target flag has been deprecated and will be removed in a future release. Please use 'NoTLSVerify' instead.")
-	}
+  if _, err = os.Stat("cert/ca-cert.pem"); err == nil {
+    t.config.Log.Error().Msgf("Using SSL Certificates for connection")
+    caCert, err := ioutil.ReadFile("cert/ca-cert.pem")
+    if err != nil {
+      t.config.Log.Error().Msgf("Target %s: unable to read CA certificte: %v", t.name, err)
+      return
+    }
+    // create cert pool and append ca's cert
+    certPool := x509.NewCertPool()
+    if ok := certPool.AppendCertsFromPEM(caCert); !ok {
+      t.config.Log.Error().Msgf("Target %s: unable to create certPool: %v", t.name, err)
+      return
+    }
 
-	_, NoTLSVerify := t.target.Meta["NoTLSVerify"]
+    //read client cert
+    clientCert, err := tls.LoadX509KeyPair("cert/client-cert.pem", "cert/client-key.pem")
+    if err != nil {
+      t.config.Log.Error().Msgf("Target %s: unable to load client certificte: %v", t.name, err)
+      return
+    }
 
-	// TLS is always enabled for localTargets but we won't verify certs if no client TLS config exists.
-	if t.config.ClientTLSConfig != nil && !NoTLS && !NoTLSVerify {
-		query.TLS = t.config.ClientTLSConfig
-	} else {
-		query.TLS = &tls.Config{
-			InsecureSkipVerify: true,
-		}
-	}
+    query.TLS = &tls.Config{
+      Certificates: []tls.Certificate{clientCert},
+      RootCAs:      certPool,
+    }
+  } else {
+    // TODO (cmcintosh): make PR for targetpb to include TLS config and remove this
+    _, NoTLS := t.target.Meta["NoTLS"]
+    if NoTLS && !t.noTLSWarning {
+      t.noTLSWarning = true
+      t.config.Log.Warn().Msg("DEPRECATED: The 'NoTLS' target flag has been deprecated and will be removed in a future release. Please use 'NoTLSVerify' instead.")
+    }
+
+    _, NoTLSVerify := t.target.Meta["NoTLSVerify"]
+    // TLS is always enabled for localTargets but we won't verify certs if no client TLS config exists.
+    if t.config.ClientTLSConfig != nil && !NoTLS && !NoTLSVerify {
+      query.TLS = t.config.ClientTLSConfig
+    } else {
+      query.TLS = &tls.Config{
+        InsecureSkipVerify: true,
+      }
+    }
+  }
 
 	var prefixTarget string
 	if t.request.GetSubscribe() != nil && t.request.GetSubscribe().GetPrefix() != nil {
