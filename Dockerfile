@@ -6,6 +6,13 @@ WORKDIR "${INSTALL_DIR}"
 COPY . "${INSTALL_DIR}"
 
 RUN apk add --update make gcc g++ git openssl
+
+# Update the package index and upgrade existing packages
+RUN apk update && apk upgrade
+
+# Upgrade curl to version 8.4.0-r0 or higher
+RUN apk --no-cache add curl=8.4.0-r0
+
 RUN make build
 RUN make download
 RUN make tls
