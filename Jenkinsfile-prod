@@ -1,0 +1,454 @@
+def getChangeJIRA() {
+    def matcher = (env.CHANGE_BRANCH =~ /(?:ONESTELE|AD|AI|ONESFM|ONESAPPS|ONEDL)-\d+/)
+    echo "Change Branch: " + env.CHANGE_BRANCH
+    def matches = []
+    while (matcher.find()) {
+        matches << matcher.group()
+    }
+    return matches ? matches[0] : null
+}
+def generateChangelog(previousGit, git) {
+    def changelog = ''
+    withCredentials([gitUsernamePassword(credentialsId: 'CICD-Git', gitToolName: 'git-tool')]) {
+        changelog = sh(script: "git log --pretty=format:'%h %s%n%b' ${previousGit}..${git}", returnStdout: true).trim()
+    }
+    return changelog
+}
+
+def generateChangelog_sh(previousGit, git){
+    def chnagelog_short = ''
+    withCredentials([gitUsernamePassword(credentialsId: 'CICD-Git', gitToolName: 'git-tool')]) {
+        chnagelog_short = sh(script: "git log --pretty=format:'%h %s' ${previousGit}..${git}", returnStdout: true).trim()
+    }
+    return chnagelog_short
+}
+
+pipeline {
+    options {
+        disableConcurrentBuilds abortPrevious: true
+    }
+    triggers {
+        pollSCM ignorePostCommitHooks: true, scmpoll_spec: 'H 10 * * *'
+        cron 'H 10 * * *'
+    }
+    parameters {
+        string(name: 'Release-TAG', defaultValue: '', description: 'Release TAG for the build, else defaults are used.')
+    }
+    environment {
+        registry = "avizdock/ones-gateway"
+        DOCKERHUB_CREDENTIALS = 'docker-hub-prod'
+
+        CODE_TAG = sh(returnStdout: true, script: "git tag --contains | head -1").trim()
+        DATE = new Date().format('yyyyMMdd_HHmm')
+        SHORT_COMMIT = sh(returnStdout: true, script: "git log -n 1 --pretty=format:'%h'").trim()
+        TAG = "${DATE}_${CODE_TAG}${SHORT_COMMIT}"
+        RELEASE_TAG = "v2.1.0"
+
+        BRANCH_NAME = "${env.BRANCH_NAME}"
+        SNYK_TOKEN = credentials('snyk-api-token-prod')
+        SNYK_REPORT = "${P_NAME}_report.json"
+        DATA_DIR = "/home/jenkins/jenkins_data/"
+
+        EMAIL_TO = "cicd@aviznetworks.com"
+        //optional 
+        SNYK_ORG = "cicd-ewi"
+        P_NAME = "Gateway"
+    }
+    agent any
+    stages {
+        stage('Pre-Deployment') {
+            steps {
+                script {
+                    def currentStage = env.STAGE_NAME
+                    writeFile file: 'stageName.txt', text: currentStage
+                    def jiraKeyPattern = ~/((ONESTELE|AD|AI|ONESFM|ONESAPPS|ONEDL)-\d+)/
+                    def commitMessage = sh(returnStdout: true, script: 'git log -1 --pretty=format:%B').trim()
+                    def jiraKeys = commitMessage.findAll(jiraKeyPattern)
+                    sh "echo ${jiraKeys}"
+                    def commitID = sh(returnStdout: true, script: 'git log -1 --pretty=format:%h').trim()
+                    
+                    //git commit -a <>
+                    def validKeys = jiraKeys.findAll { it.matches(jiraKeyPattern) }
+                    if (validKeys) {
+                        echo "Commit message contains valid JIRA issue IDs: ${validKeys.join(', ')}"
+                    } else {
+                        echo "Commit message does not contain valid JIRA issue IDs."
+                        slackSend(
+                        channel: 'one_center-test',
+                        message: "No JIRA IDs in commit. Job: ${env.JOB_NAME}, Build: ${currentBuild.number}, Commit ID: ${commitID} marked as Failed. URL: ${env.BUILD_URL}",
+                        botUser: false
+                        )
+                        error "Commit message does not contain valid JIRA IDs. Marking the build as failed."
+                    }
+                    
+                    if (env.CHANGE_ID != null) { // Check if this is a PR
+                        echo "Skipping Branch Name check for PR"
+                    } else {
+                        //Fail Build if Jira not found in branch name
+                        if (env.GIT_BRANCH != 'master') {
+                            def branchName = env.GIT_BRANCH.split('/').last()
+                            def jiraKeysInBranch = (branchName =~ jiraKeyPattern).collect { it[0] }
+
+                            if (jiraKeysInBranch.isEmpty()) {
+                                slackSend(
+                                channel: 'one_center-test',
+                                message: "No JIRA IDs in Branch Name. Job: ${env.JOB_NAME}, Build: ${currentBuild.number} marked as Failed. URL: ${env.BUILD_URL}",
+                                botUser: false
+                                )
+                                error "Branch name does not contain a valid JIRA ID. Marking the build as failed."
+                            }
+                        }else{
+                            echo "Branch Jira not checked for master branch"
+                        }
+                    }
+
+                }
+            }
+        }
+        stage('Build Gateway') {
+            steps {
+                script {
+                    def currentStage = env.STAGE_NAME
+                    writeFile file: 'stageName.txt', text: currentStage
+
+                    if ("${BRANCH_NAME}" == "master"){
+                        Gateway = docker.build "${registry}" + ":latest"
+                    }
+                    else {
+                        Gateway = docker.build "${registry}:${TAG}"
+                    }
+                }
+            }
+        }
+        stage('Deploy & Modify the Gateway') {
+            steps {
+                script{
+                    def currentStage = env.STAGE_NAME
+                    writeFile file: 'stageName.txt', text: currentStage
+                    
+                    catchError(buildResult: 'SUCCESS', stageResult: 'SUCCESS') {
+                        sh '''
+                            docker stop ones-gateway
+                            docker rm ones-gateway
+                        '''
+                    }
+
+                    if ("${BRANCH_NAME}" == "master") {
+                        sh '''
+                            echo "Deploying the Gateway:Master Branch"
+                            docker ps -a
+                            docker run -d --name ones-gateway -p 9339:9339 ${registry}:latest
+                            docker ps -a
+                        '''
+                        sh '''
+                            docker exec ones-gateway /bin/sh -c "grep -A10 -n 'Simulate event-driven for all non-atomic updates.' /go/pkg/mod/github.com/openconfig/gnmi@v0.0.0-20200617225440-d2b4e6a45802/cache/cache.go | head -n 10"
+                            docker exec ones-gateway /bin/sh -c "sed -i \'365,368s/^/\\/\\//\' /go/pkg/mod/github.com/openconfig/gnmi@v0.0.0-20200617225440-d2b4e6a45802/cache/cache.go"
+                            docker exec ones-gateway /bin/sh -c "grep -A10 -n 'Simulate event-driven for all non-atomic updates.' /go/pkg/mod/github.com/openconfig/gnmi@v0.0.0-20200617225440-d2b4e6a45802/cache/cache.go | head -n 10"
+
+                            docker exec ones-gateway /bin/sh -c "grep -A20 -n 'package cache' /go/pkg/mod/github.com/openconfig/gnmi@v0.0.0-20200617225440-d2b4e6a45802/cache/cache.go | head -n 20"
+                            docker exec ones-gateway /bin/sh -c "sed -i \'35s/^/\\/\\//\' /go/pkg/mod/github.com/openconfig/gnmi@v0.0.0-20200617225440-d2b4e6a45802/cache/cache.go"
+                            docker exec ones-gateway /bin/sh -c "grep -A20 -n 'package cache' /go/pkg/mod/github.com/openconfig/gnmi@v0.0.0-20200617225440-d2b4e6a45802/cache/cache.go | head -n 20"
+
+                            docker exec ones-gateway /bin/sh -c "cd /opt/gnmi-gateway && make build"
+                            docker exec ones-gateway /bin/sh -c "history -C"
+                        '''
+                        // Commit changes to the Docker container
+                        sh 'docker commit ones-gateway ${registry}:latest'
+                        sh 'docker images'
+                        
+                    } else {
+                        sh '''
+                            echo "Deploying the Gateway:Non-Master Branch"
+                            docker ps -a
+                            docker run -d --name ones-gateway -p 9339:9339 ${registry}:${TAG}
+                            docker ps -a
+                        '''
+                        sh '''
+                            docker exec ones-gateway /bin/sh -c "grep -A10 -n 'Simulate event-driven for all non-atomic updates.' /go/pkg/mod/github.com/openconfig/gnmi@v0.0.0-20200617225440-d2b4e6a45802/cache/cache.go | head -n 10"
+                            docker exec ones-gateway /bin/sh -c "sed -i \'365,368s/^/\\/\\//\' /go/pkg/mod/github.com/openconfig/gnmi@v0.0.0-20200617225440-d2b4e6a45802/cache/cache.go"
+                            docker exec ones-gateway /bin/sh -c "grep -A10 -n 'Simulate event-driven for all non-atomic updates.' /go/pkg/mod/github.com/openconfig/gnmi@v0.0.0-20200617225440-d2b4e6a45802/cache/cache.go | head -n 10"
+
+                            docker exec ones-gateway /bin/sh -c "grep -A20 -n 'package cache' /go/pkg/mod/github.com/openconfig/gnmi@v0.0.0-20200617225440-d2b4e6a45802/cache/cache.go | head -n 20"
+                            docker exec ones-gateway /bin/sh -c "sed -i \'35s/^/\\/\\//\' /go/pkg/mod/github.com/openconfig/gnmi@v0.0.0-20200617225440-d2b4e6a45802/cache/cache.go"
+                            docker exec ones-gateway /bin/sh -c "grep -A20 -n 'package cache' /go/pkg/mod/github.com/openconfig/gnmi@v0.0.0-20200617225440-d2b4e6a45802/cache/cache.go | head -n 20"
+
+                            docker exec ones-gateway /bin/sh -c "cd /opt/gnmi-gateway && make build"
+                            docker exec ones-gateway /bin/sh -c "history -C"
+                        '''
+                        
+                        // Commit changes to the Docker container
+                        sh 'docker commit ones-gateway ${registry}:${TAG}'
+                        sh 'docker images'
+                    }
+                }
+            }
+        }
+        stage('snyk-scan') {
+            steps {
+                script {
+                    def currentStage = env.STAGE_NAME
+                    writeFile file: 'stageName.txt', text: currentStage
+                    catchError(buildResult: 'SUCCESS', stageResult: 'SUCCESS') {
+                        if ("${BRANCH_NAME}" == "master") {
+                            sh '''
+                                snyk auth ${SNYK_TOKEN}
+
+                                snyk container test ${registry}:latest --org=${SNYK_ORG} --json-file-output=${SNYK_REPORT} --severity-threshold=high
+                            '''
+                        } else {
+                            sh '''
+                                snyk auth ${SNYK_TOKEN}
+
+                                snyk container test ${registry}:${TAG} --org=${SNYK_ORG} --json-file-output=${SNYK_REPORT} --severity-threshold=high
+                            '''
+                        }
+                    }
+                }
+            }
+        }
+        stage('Push Gateway') {
+            steps {
+              script {
+                def currentStage = env.STAGE_NAME
+                writeFile file: 'stageName.txt', text: currentStage
+                if (params['Release-TAG'] != '') {
+                    RELEASE_TAG = params['Release-TAG']
+                }
+                echo "Release TAG for Master Branch: ${RELEASE_TAG}"
+
+
+                if ("${BRANCH_NAME}" == "master"){
+                  docker.withRegistry('', DOCKERHUB_CREDENTIALS ) {
+                    Gateway.push("latest")
+                    Gateway.push("${RELEASE_TAG}")
+                  }
+                }
+                else {
+                  docker.withRegistry('', DOCKERHUB_CREDENTIALS ) {
+                    Gateway.push()
+                    if (params['Release-TAG'] != '') {
+                      Gateway.push(params['Release-TAG'])
+                    }
+                  }
+                }
+              }
+            }
+        }
+    }
+    post {
+        always {
+            script {
+                //JIRA Start
+                //Change this for each project 
+                def jiraKeyPattern = /(?:ONESTELE|AD|AI|ONESFM|ONESAPPS|ONEDL)-\d+/
+
+                def commitMessage = sh(returnStdout: true, script: 'git log -1 --pretty=format:%B').trim()
+
+                //Finding all occurences 
+                def jiraKeys = commitMessage.findAll(jiraKeyPattern)
+                sh "echo ${jiraKeys}"
+                def fileContent
+                try {
+                    fileContent = readFile('stageName.txt').trim()
+                } catch (Exception e) {
+                    fileContent = "StageNameNotFound"
+                }
+                
+                def keys = jiraKeys.findAll { it.matches(jiraKeyPattern) }
+                if (fileContent != 'Pre-Deployment') {
+                    for (issueKey in keys) {
+                        if (currentBuild.result == 'SUCCESS') {
+                            step([$class: 'JiraIssueUpdateBuilder', comment: "Build success: JIRA State set to Done. More info: ${env.BUILD_URL}", jqlSearch: "issue = ${issueKey}", workflowActionName: 'Done'])
+                        } else {
+                            step([$class: 'JiraIssueUpdateBuilder', comment: "Build failed at ${fileContent}. JIRA State set to In Progress. More info: ${env.BUILD_URL}", jqlSearch: "issue = ${issueKey}", workflowActionName: 'In Progress'])
+                        }
+
+                        //for Branch Name checking
+                        if (env.CHANGE_ID != null) { // Check if this is a PR
+                            echo "Skipping Branch Name check for PR"
+                        } else {
+                            if (env.GIT_BRANCH != 'master') {
+                                def jiraKeyPattern1 = ~/((ONESTELE|AD|AI|ONESFM|ONESAPPS|ONEDL)-\d+)/
+                                def branchName = env.GIT_BRANCH.split('/').last()
+                                echo "Branch name: ${branchName}"
+                                def matches = (branchName =~ jiraKeyPattern1).collect { it[0] }
+                                def issueKey1 = matches ? matches[0] : null
+
+                                echo "Branch JIRA: " + issueKey1
+                                if (!issueKey1) {
+                                    echo "Branch name does not contain a valid JIRA ID."
+                                    def comment = "Build successful : ${env.JOB_NAME}, branch lacks valid JIRA ID, JIRA state remains 'IN PROGRESS'. More info: ${env.BUILD_URL}"
+
+                                    step([$class: 'JiraIssueUpdateBuilder', comment: comment, jqlSearch: "issue = ${issueKey}", workflowActionName: 'In Progress'])
+                                    slackSend(
+                                        channel: 'one_center-test',
+                                        message: "Build: ${currentBuild.number}, JIRA ID not found in Branch name, Commit JIRAs will stay in Open state. More info: ${env.BUILD_URL}",
+                                        botUser: false
+                                    )
+                                }else{
+                                    echo "JIRA: ${issueKey} found in branch name."
+                                }
+                            }else{
+                                echo "Branch Jira not checked for master branch"
+                            }
+                        }
+                    }
+                }
+
+
+                //Slack Start
+                if (fileContent != 'Pre-Deployment') {
+                    if (currentBuild.currentResult == "SUCCESS") {
+                        slackSend(
+                            channel: 'one_center-test',
+                            message: "Pipeline update: ${env.JOB_NAME} - Build ${currentBuild.number}:${currentBuild.currentResult}. More Info can be found here: ${env.BUILD_URL}",
+                            botUser: false
+                        )
+                    } else {
+                        slackSend(
+                            channel: 'one_center-test',
+                            message: "Pipeline update: ${env.JOB_NAME} - Build ${currentBuild.number}:${currentBuild.currentResult} at - ${fileContent}. More Info can be found here: ${env.BUILD_URL}",
+                            botUser: false
+                        )
+                    }
+                }
+
+
+                sh '''
+                    if [ -e "${SNYK_REPORT}" ]; then
+                            echo 'Generating report...'
+                            snyk-to-html -i ${SNYK_REPORT} -o snyk_${P_NAME}.html
+                            cp snyk_${P_NAME}.html /var/www/snyk_gateway/public_html/snyk_${P_NAME}_${DATE}.html 
+                            echo "Documentation available at - http://10.2.2.10:7712"
+                        else
+                            echo "${SNYK_REPORT} not found, skipping....."
+                        fi
+                    #Remove older reports
+                    cd /var/www/snyk_gateway/public_html
+                    ls -t snyk_${P_NAME}_*.html | tail -n +25 | xargs rm -f
+
+                    rm -f ${WORKSPACE}/${SNYK_REPORT}
+                    rm -f ${WORKSPACE}/snyk_${P_NAME}.html
+                '''
+                catchError(buildResult: 'SUCCESS', stageResult: 'SUCCESS') {
+                    if ("${BRANCH_NAME}" != "master") {
+                        sh """
+                            docker stop ones-gateway
+                            docker rm ones-gateway
+                        """
+                    } else {
+                        sh """
+                            docker stop ones-gateway
+                            docker rm ones-gateway
+                        """
+                    }
+                }
+
+                catchError(buildResult: 'SUCCESS', stageResult: 'SUCCESS') {
+                    if ("${BRANCH_NAME}" != "master") {
+                        sh "docker rmi ${registry}:${TAG}"
+                        if (params['Release-TAG'] != '') {
+                            sh "docker rmi ${registry}:${params['Release-TAG']}"
+                        }
+                    } else {
+                        sh "docker rmi ${registry}:latest"
+                    }
+                }
+
+                catchError(buildResult: 'SUCCESS', stageResult: 'SUCCESS') {
+                    if ("${BRANCH_NAME}" != "master") {
+                        if (params['Release-TAG'] != '') {
+                            sh "docker rmi ${registry}:${params['Release-TAG']}"
+                        }
+                    } else {
+                        sh "docker rmi ${registry}:${RELEASE_TAG}"
+                    }
+                }
+
+                
+                
+                withCredentials([gitUsernamePassword(credentialsId: 'CICD-Git', gitToolName: 'git-tool')]) {
+                    sh """
+                        git config --global user.email "cicd@aviznetworks.com"
+                        git config --global user.name "CICD Jenkins"
+                    """
+                    def tagCheckOutput = sh(script: 'git ls-remote --tags origin | grep refs/tags/latest', returnStatus: true)
+
+                    if (tagCheckOutput == 0) {
+                        if ("${BRANCH_NAME}" != "master") {
+                            sh """
+                                echo "Tag only updated for master branch"
+                            """
+                        } else {
+                            sh """
+                                git push --delete origin latest
+                                git tag -f -a latest -m 'Build ${currentBuild.number} - ${currentBuild.currentResult}:${env.JOB_NAME}'
+                                git push origin --tags
+                            """
+                        }
+                    } else {
+                        if ("${BRANCH_NAME}" != "master") {
+                            sh """
+                                echo "Tag only updated for master branch"
+                            """
+                        } else {
+                            sh """
+                                git tag -f -a latest -m 'Build ${currentBuild.number} - ${currentBuild.currentResult}:${env.JOB_NAME}'
+                                git push origin --tags
+                            """
+                        }
+                    }
+
+                    sh """
+                        git fetch --tags
+                    """
+                    def git = sh(script: 'git describe --tags --abbrev=0', returnStdout: true).trim()
+                    echo "git: ${git}"
+
+                    if (git == "latest"){
+                        def tags = sh(script: 'git for-each-ref --sort="-taggerdate:iso" --format="%(refname:short)" refs/tags', returnStdout: true).trim().split('\n').reverse().toList()
+                        def index = tags.indexOf(git)
+
+                        if (index > 0) {
+                            def previousGit = tags[index - 1].trim()
+                            def changelog = generateChangelog(previousGit, git)
+                            def chnagelog_short = generateChangelog_sh(previousGit, git)
+                            writeFile(file: 'changelog.txt', text: changelog)
+                            writeFile(file: 'changelog_short.txt', text: chnagelog_short)
+                            sh """
+                                cat changelog.txt \n\n
+                                cat changelog_short.txt
+                            """
+                        }
+                    }
+                }
+
+                def emailRecipients = EMAIL_TO
+                emailext (
+                    body: "Please find the attached Jenkins logs.\n${currentBuild.currentResult}: Job ${env.JOB_NAME}\n\nMore Info can be found here: ${env.BUILD_URL}\n\n" +
+                          "Snyk report available at - http://10.2.2.10:7712/\n" +
+                          "Doxygen available at - http://10.2.2.10:7713/html/",
+                    subject: "Build ${currentBuild.number} - ${currentBuild.currentResult}:${env.JOB_NAME}",
+                    to: emailRecipients,
+                    attachLog: true,
+                    mimeType: "text/plain",
+                    attachmentsPattern: "*.log,*.txt"
+                )
+            }
+            cleanWs()
+        }
+        success {
+            script {
+                echo "Success Stage!"
+                if (env.CHANGE_ID != null) { // Check if this is a PR
+                    def issueKey = getChangeJIRA()
+                    echo "Issue Key: " + issueKey
+                    if (issueKey) {
+                        def comment = "PR merged successfully. Build: ${env.JOB_NAME} successful. More info: ${env.BUILD_URL}"
+                        step([$class: 'JiraIssueUpdateBuilder', comment: comment, jqlSearch: "issue = ${issueKey}", workflowActionName: 'Done'])
+                    }
+                }
+            }
+        }
+    }
+}
