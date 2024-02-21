@@ -8,7 +8,7 @@ COPY . "${INSTALL_DIR}"
 RUN apk add --update make gcc g++ git openssl && \
     apk update && \
     apk upgrade && \
-    apk --no-cache add curl=8.4.0-r0 && \
+    apk --no-cache add curl=8.5.0-r0 && \
     make build && \
     make download && \
     make tls && \
