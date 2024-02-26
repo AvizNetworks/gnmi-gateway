@@ -85,7 +85,7 @@ pipeline {
                         echo "Skipping Branch Name check for PR"
                     } else {
                         //Fail Build if Jira not found in branch name
-                        if (env.GIT_BRANCH != 'master') {
+                        if (env.GIT_BRANCH != 'release') {
                             def branchName = env.GIT_BRANCH.split('/').last()
                             def jiraKeysInBranch = (branchName =~ jiraKeyPattern).collect { it[0] }
 
@@ -98,7 +98,7 @@ pipeline {
                                 error "Branch name does not contain a valid JIRA ID. Marking the build as failed."
                             }
                         }else{
-                            echo "Branch Jira not checked for master branch"
+                            echo "Branch Jira not checked for release branch"
                         }
                     }
 
@@ -111,7 +111,7 @@ pipeline {
                     def currentStage = env.STAGE_NAME
                     writeFile file: 'stageName.txt', text: currentStage
 
-                    if ("${BRANCH_NAME}" == "master"){
+                    if ("${BRANCH_NAME}" == "release"){
                         Gateway = docker.build "${registry}" + ":latest"
                     }
                     else {
@@ -133,9 +133,9 @@ pipeline {
                         '''
                     }
 
-                    if ("${BRANCH_NAME}" == "master") {
+                    if ("${BRANCH_NAME}" == "release") {
                         sh '''
-                            echo "Deploying the Gateway:Master Branch"
+                            echo "Deploying the Gateway:release Branch"
                             docker ps -a
                             docker run -d --name ones-gateway -p 9339:9339 ${registry}:latest
                             docker ps -a
@@ -158,7 +158,7 @@ pipeline {
                         
                     } else {
                         sh '''
-                            echo "Deploying the Gateway:Non-Master Branch"
+                            echo "Deploying the Gateway:Non-release Branch"
                             docker ps -a
                             docker run -d --name ones-gateway -p 9339:9339 ${registry}:${TAG}
                             docker ps -a
@@ -189,7 +189,7 @@ pipeline {
                     def currentStage = env.STAGE_NAME
                     writeFile file: 'stageName.txt', text: currentStage
                     catchError(buildResult: 'SUCCESS', stageResult: 'SUCCESS') {
-                        if ("${BRANCH_NAME}" == "master") {
+                        if ("${BRANCH_NAME}" == "release") {
                             sh '''
                                 snyk auth ${SNYK_TOKEN}
 
@@ -214,10 +214,10 @@ pipeline {
                 if (params['Release-TAG'] != '') {
                     RELEASE_TAG = params['Release-TAG']
                 }
-                echo "Release TAG for Master Branch: ${RELEASE_TAG}"
+                echo "Release TAG for release Branch: ${RELEASE_TAG}"
 
 
-                if ("${BRANCH_NAME}" == "master"){
+                if ("${BRANCH_NAME}" == "release"){
                   docker.withRegistry('', DOCKERHUB_CREDENTIALS ) {
                     Gateway.push("latest")
                     Gateway.push("${RELEASE_TAG}")
@@ -267,7 +267,7 @@ pipeline {
                         if (env.CHANGE_ID != null) { // Check if this is a PR
                             echo "Skipping Branch Name check for PR"
                         } else {
-                            if (env.GIT_BRANCH != 'master') {
+                            if (env.GIT_BRANCH != 'release') {
                                 def jiraKeyPattern1 = ~/((ONESTELE|AD|AI|ONESFM|ONESAPPS|ONEDL)-\d+)/
                                 def branchName = env.GIT_BRANCH.split('/').last()
                                 echo "Branch name: ${branchName}"
@@ -289,7 +289,7 @@ pipeline {
                                     echo "JIRA: ${issueKey} found in branch name."
                                 }
                             }else{
-                                echo "Branch Jira not checked for master branch"
+                                echo "Branch Jira not checked for release branch"
                             }
                         }
                     }
@@ -331,7 +331,7 @@ pipeline {
                     rm -f ${WORKSPACE}/snyk_${P_NAME}.html
                 '''
                 catchError(buildResult: 'SUCCESS', stageResult: 'SUCCESS') {
-                    if ("${BRANCH_NAME}" != "master") {
+                    if ("${BRANCH_NAME}" != "release") {
                         sh """
                             docker stop ones-gateway
                             docker rm ones-gateway
@@ -345,7 +345,7 @@ pipeline {
                 }
 
                 catchError(buildResult: 'SUCCESS', stageResult: 'SUCCESS') {
-                    if ("${BRANCH_NAME}" != "master") {
+                    if ("${BRANCH_NAME}" != "release") {
                         sh "docker rmi ${registry}:${TAG}"
                         if (params['Release-TAG'] != '') {
                             sh "docker rmi ${registry}:${params['Release-TAG']}"
@@ -356,7 +356,7 @@ pipeline {
                 }
 
                 catchError(buildResult: 'SUCCESS', stageResult: 'SUCCESS') {
-                    if ("${BRANCH_NAME}" != "master") {
+                    if ("${BRANCH_NAME}" != "release") {
                         if (params['Release-TAG'] != '') {
                             sh "docker rmi ${registry}:${params['Release-TAG']}"
                         }
@@ -375,9 +375,9 @@ pipeline {
                     def tagCheckOutput = sh(script: 'git ls-remote --tags origin | grep refs/tags/latest', returnStatus: true)
 
                     if (tagCheckOutput == 0) {
-                        if ("${BRANCH_NAME}" != "master") {
+                        if ("${BRANCH_NAME}" != "release") {
                             sh """
-                                echo "Tag only updated for master branch"
+                                echo "Tag only updated for release branch"
                             """
                         } else {
                             sh """
@@ -387,9 +387,9 @@ pipeline {
                             """
                         }
                     } else {
-                        if ("${BRANCH_NAME}" != "master") {
+                        if ("${BRANCH_NAME}" != "release") {
                             sh """
-                                echo "Tag only updated for master branch"
+                                echo "Tag only updated for release branch"
                             """
                         } else {
                             sh """
