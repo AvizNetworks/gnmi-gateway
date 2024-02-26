@@ -1,5 +1,5 @@
 def getChangeJIRA() {
-    def matcher = (env.CHANGE_BRANCH =~ /(?:ONESTELE|AD|AI|ONESFM|ONESAPPS|ONEDL)-\d+/)
+    def matcher = (env.CHANGE_BRANCH =~ /(?:ONESTELE|AD|AI|ONESFM|ONESAPPS|ONEDL|ED)-\d+/)
     echo "Change Branch: " + env.CHANGE_BRANCH
     def matches = []
     while (matcher.find()) {
@@ -61,7 +61,7 @@ pipeline {
                 script {
                     def currentStage = env.STAGE_NAME
                     writeFile file: 'stageName.txt', text: currentStage
-                    def jiraKeyPattern = ~/((ONESTELE|AD|AI|ONESFM|ONESAPPS|ONEDL)-\d+)/
+                    def jiraKeyPattern = ~/((ONESTELE|AD|AI|ONESFM|ONESAPPS|ONEDL|ED)-\d+)/
                     def commitMessage = sh(returnStdout: true, script: 'git log -1 --pretty=format:%B').trim()
                     def jiraKeys = commitMessage.findAll(jiraKeyPattern)
                     sh "echo ${jiraKeys}"
@@ -74,7 +74,7 @@ pipeline {
                     } else {
                         echo "Commit message does not contain valid JIRA issue IDs."
                         slackSend(
-                        channel: 'one_center-test',
+                        channel: 'jenkins-ses_collector',
                         message: "No JIRA IDs in commit. Job: ${env.JOB_NAME}, Build: ${currentBuild.number}, Commit ID: ${commitID} marked as Failed. URL: ${env.BUILD_URL}",
                         botUser: false
                         )
@@ -91,7 +91,7 @@ pipeline {
 
                             if (jiraKeysInBranch.isEmpty()) {
                                 slackSend(
-                                channel: 'one_center-test',
+                                channel: 'jenkins-ses_collector',
                                 message: "No JIRA IDs in Branch Name. Job: ${env.JOB_NAME}, Build: ${currentBuild.number} marked as Failed. URL: ${env.BUILD_URL}",
                                 botUser: false
                                 )
@@ -240,7 +240,7 @@ pipeline {
             script {
                 //JIRA Start
                 //Change this for each project 
-                def jiraKeyPattern = /(?:ONESTELE|AD|AI|ONESFM|ONESAPPS|ONEDL)-\d+/
+                def jiraKeyPattern = /(?:ONESTELE|AD|AI|ONESFM|ONESAPPS|ONEDL|ED)-\d+/
 
                 def commitMessage = sh(returnStdout: true, script: 'git log -1 --pretty=format:%B').trim()
 
@@ -268,7 +268,7 @@ pipeline {
                             echo "Skipping Branch Name check for PR"
                         } else {
                             if (env.GIT_BRANCH != 'release') {
-                                def jiraKeyPattern1 = ~/((ONESTELE|AD|AI|ONESFM|ONESAPPS|ONEDL)-\d+)/
+                                def jiraKeyPattern1 = ~/((ONESTELE|AD|AI|ONESFM|ONESAPPS|ONEDL|ED)-\d+)/
                                 def branchName = env.GIT_BRANCH.split('/').last()
                                 echo "Branch name: ${branchName}"
                                 def matches = (branchName =~ jiraKeyPattern1).collect { it[0] }
@@ -281,7 +281,7 @@ pipeline {
 
                                     step([$class: 'JiraIssueUpdateBuilder', comment: comment, jqlSearch: "issue = ${issueKey}", workflowActionName: 'In Progress'])
                                     slackSend(
-                                        channel: 'one_center-test',
+                                        channel: 'jenkins-ses_collector',
                                         message: "Build: ${currentBuild.number}, JIRA ID not found in Branch name, Commit JIRAs will stay in Open state. More info: ${env.BUILD_URL}",
                                         botUser: false
                                     )
@@ -300,13 +300,13 @@ pipeline {
                 if (fileContent != 'Pre-Deployment') {
                     if (currentBuild.currentResult == "SUCCESS") {
                         slackSend(
-                            channel: 'one_center-test',
+                            channel: 'jenkins-ses_collector',
                             message: "Pipeline update: ${env.JOB_NAME} - Build ${currentBuild.number}:${currentBuild.currentResult}. More Info can be found here: ${env.BUILD_URL}",
                             botUser: false
                         )
                     } else {
                         slackSend(
-                            channel: 'one_center-test',
+                            channel: 'jenkins-ses_collector',
                             message: "Pipeline update: ${env.JOB_NAME} - Build ${currentBuild.number}:${currentBuild.currentResult} at - ${fileContent}. More Info can be found here: ${env.BUILD_URL}",
                             botUser: false
                         )
