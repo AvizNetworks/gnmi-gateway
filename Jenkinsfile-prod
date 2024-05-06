@@ -82,7 +82,7 @@ pipeline {
                             echo "Not a release branch."
                             if (jiraKeysInBranch.isEmpty()) {
                                 slackSend(
-                                    channel: 'jenkins-ones-cd',
+                                    channel: 'jenkins-ses_collector',
                                     message: "No JIRA IDs in Branch Name. Job: ${env.JOB_NAME}, Build: ${currentBuild.number} marked as Failed. URL: ${env.BUILD_URL}",
                                     botUser: false
                                 )
@@ -99,7 +99,7 @@ pipeline {
                     } else {
                         echo "Commit message does not contain valid JIRA issue IDs."
                         slackSend(
-                        channel: 'jenkins-ones-cd',
+                        channel: 'jenkins-ses_collector',
                         message: "No JIRA IDs in commit. Job: ${env.JOB_NAME}, Build: ${currentBuild.number}, Commit ID: ${commitID} marked as Failed. URL: ${env.BUILD_URL}",
                         botUser: false
                         )
