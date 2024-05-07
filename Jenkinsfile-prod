@@ -1,5 +1,5 @@
 def getChangeJIRA() {
-    def matcher = (env.CHANGE_BRANCH =~ /(?:ONESTELE|AD|AI|ONESFM|ONESAPPS|ONEDL|ED)-\d+/)
+    def matcher = (env.CHANGE_BRANCH =~ /(?:ONESTELE|AD|AI|ONESFM|ONESAPPS|ED|ONEDL|KMS|OPBNOS)-\d+/)
     echo "Change Branch: " + env.CHANGE_BRANCH
     def matches = []
     while (matcher.find()) {
@@ -29,7 +29,6 @@ pipeline {
     }
     triggers {
         pollSCM ignorePostCommitHooks: true, scmpoll_spec: 'H 10 * * *'
-        cron 'H 10 * * *'
     }
     parameters {
         string(name: 'Release-TAG', defaultValue: '', description: 'Release TAG for the build, else defaults are used.')
@@ -42,7 +41,7 @@ pipeline {
         DATE = new Date().format('yyyyMMdd_HHmm')
         SHORT_COMMIT = sh(returnStdout: true, script: "git log -n 1 --pretty=format:'%h'").trim()
         TAG = "${DATE}_${CODE_TAG}${SHORT_COMMIT}"
-        RELEASE_TAG = "v2.1.0"
+        RELEASE_TAG = "latest"
 
         BRANCH_NAME = "${env.BRANCH_NAME}"
         SNYK_TOKEN = credentials('snyk-api-token-prod')
@@ -61,45 +60,50 @@ pipeline {
                 script {
                     def currentStage = env.STAGE_NAME
                     writeFile file: 'stageName.txt', text: currentStage
-                    def jiraKeyPattern = ~/((ONESTELE|AD|AI|ONESFM|ONESAPPS|ONEDL|ED)-\d+)/
+
+                    def jiraKeyPattern = ~/((ONESTELE|AD|AI|ONESFM|ONESAPPS|ED|ONEDL|KMS|OPBNOS)-\d+)/
                     def commitMessage = sh(returnStdout: true, script: 'git log -1 --pretty=format:%B').trim()
                     def jiraKeys = commitMessage.findAll(jiraKeyPattern)
                     sh "echo ${jiraKeys}"
+
                     def commitID = sh(returnStdout: true, script: 'git log -1 --pretty=format:%h').trim()
+
+                    if (env.CHANGE_ID == null && env.GIT_BRANCH != 'master') {
+                        def branchName = env.GIT_BRANCH.split('/').last()
+                        def jiraKeysInBranch = (branchName =~ jiraKeyPattern).collect { it[0] }
+
+                        def versionPattern1 = /v\d+(\.\d+)+_[A-Z]+/
+                        def versionPattern2 = /v\d+(\.\d+)+/
+                        def containsVersion1 = branchName.find(versionPattern1)
+                        def containsVersion2 = branchName.find(versionPattern2)
+                        println "${containsVersion1} || ${containsVersion2}"
+                        
+                        if (!containsVersion1 && !containsVersion2) {
+                            echo "Not a release branch."
+                            if (jiraKeysInBranch.isEmpty()) {
+                                slackSend(
+                                    channel: 'jenkins-ones-cd',
+                                    message: "No JIRA IDs in Branch Name. Job: ${env.JOB_NAME}, Build: ${currentBuild.number} marked as Failed. URL: ${env.BUILD_URL}",
+                                    botUser: false
+                                )
+                                error "Branch name does not contain a valid JIRA ID. Marking the build as failed."
+                            } else {
+                                echo "Branch Jira not checked for master branch"
+                            }
+                        }
+                    }
                     
-                    //git commit -a <>
                     def validKeys = jiraKeys.findAll { it.matches(jiraKeyPattern) }
                     if (validKeys) {
                         echo "Commit message contains valid JIRA issue IDs: ${validKeys.join(', ')}"
                     } else {
                         echo "Commit message does not contain valid JIRA issue IDs."
                         slackSend(
-                        channel: 'jenkins-ses_collector',
+                        channel: 'jenkins-ones-cd',
                         message: "No JIRA IDs in commit. Job: ${env.JOB_NAME}, Build: ${currentBuild.number}, Commit ID: ${commitID} marked as Failed. URL: ${env.BUILD_URL}",
                         botUser: false
                         )
                         error "Commit message does not contain valid JIRA IDs. Marking the build as failed."
-                    }
-                    
-                    if (env.CHANGE_ID != null) { // Check if this is a PR
-                        echo "Skipping Branch Name check for PR"
-                    } else {
-                        //Fail Build if Jira not found in branch name
-                        if (env.GIT_BRANCH != 'release') {
-                            def branchName = env.GIT_BRANCH.split('/').last()
-                            def jiraKeysInBranch = (branchName =~ jiraKeyPattern).collect { it[0] }
-
-                            if (jiraKeysInBranch.isEmpty()) {
-                                slackSend(
-                                channel: 'jenkins-ses_collector',
-                                message: "No JIRA IDs in Branch Name. Job: ${env.JOB_NAME}, Build: ${currentBuild.number} marked as Failed. URL: ${env.BUILD_URL}",
-                                botUser: false
-                                )
-                                error "Branch name does not contain a valid JIRA ID. Marking the build as failed."
-                            }
-                        }else{
-                            echo "Branch Jira not checked for release branch"
-                        }
                     }
 
                 }
@@ -240,7 +244,7 @@ pipeline {
             script {
                 //JIRA Start
                 //Change this for each project 
-                def jiraKeyPattern = /(?:ONESTELE|AD|AI|ONESFM|ONESAPPS|ONEDL|ED)-\d+/
+                def jiraKeyPattern = /(?:ONESTELE|AD|AI|ONESFM|ONESAPPS|ED|ONEDL|KMS|OPBNOS)-\d+/
 
                 def commitMessage = sh(returnStdout: true, script: 'git log -1 --pretty=format:%B').trim()
 
@@ -261,36 +265,6 @@ pipeline {
                             step([$class: 'JiraIssueUpdateBuilder', comment: "Build success: JIRA State set to Done. More info: ${env.BUILD_URL}", jqlSearch: "issue = ${issueKey}", workflowActionName: 'Done'])
                         } else {
                             step([$class: 'JiraIssueUpdateBuilder', comment: "Build failed at ${fileContent}. JIRA State set to In Progress. More info: ${env.BUILD_URL}", jqlSearch: "issue = ${issueKey}", workflowActionName: 'In Progress'])
-                        }
-
-                        //for Branch Name checking
-                        if (env.CHANGE_ID != null) { // Check if this is a PR
-                            echo "Skipping Branch Name check for PR"
-                        } else {
-                            if (env.GIT_BRANCH != 'release') {
-                                def jiraKeyPattern1 = ~/((ONESTELE|AD|AI|ONESFM|ONESAPPS|ONEDL|ED)-\d+)/
-                                def branchName = env.GIT_BRANCH.split('/').last()
-                                echo "Branch name: ${branchName}"
-                                def matches = (branchName =~ jiraKeyPattern1).collect { it[0] }
-                                def issueKey1 = matches ? matches[0] : null
-
-                                echo "Branch JIRA: " + issueKey1
-                                if (!issueKey1) {
-                                    echo "Branch name does not contain a valid JIRA ID."
-                                    def comment = "Build successful : ${env.JOB_NAME}, branch lacks valid JIRA ID, JIRA state remains 'IN PROGRESS'. More info: ${env.BUILD_URL}"
-
-                                    step([$class: 'JiraIssueUpdateBuilder', comment: comment, jqlSearch: "issue = ${issueKey}", workflowActionName: 'In Progress'])
-                                    slackSend(
-                                        channel: 'jenkins-ses_collector',
-                                        message: "Build: ${currentBuild.number}, JIRA ID not found in Branch name, Commit JIRAs will stay in Open state. More info: ${env.BUILD_URL}",
-                                        botUser: false
-                                    )
-                                }else{
-                                    echo "JIRA: ${issueKey} found in branch name."
-                                }
-                            }else{
-                                echo "Branch Jira not checked for release branch"
-                            }
                         }
                     }
                 }
