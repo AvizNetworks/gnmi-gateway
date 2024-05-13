@@ -68,7 +68,7 @@ pipeline {
 
                     def commitID = sh(returnStdout: true, script: 'git log -1 --pretty=format:%h').trim()
 
-                    if (env.CHANGE_ID == null && env.GIT_BRANCH != 'master') {
+                    if (env.CHANGE_ID == null && env.GIT_BRANCH != 'release') {
                         def branchName = env.GIT_BRANCH.split('/').last()
                         def jiraKeysInBranch = (branchName =~ jiraKeyPattern).collect { it[0] }
 
@@ -88,7 +88,7 @@ pipeline {
                                 )
                                 error "Branch name does not contain a valid JIRA ID. Marking the build as failed."
                             } else {
-                                echo "Branch Jira not checked for master branch"
+                                echo "Branch Jira not checked for Master(release) branch"
                             }
                         }
                     }
